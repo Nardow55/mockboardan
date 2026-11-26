@@ -253,6 +253,9 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
 .ghud .sc{font-family:var(--display);font-weight:900;font-size:34px;line-height:1}
 .ghud .lives{letter-spacing:2px;color:var(--bad);font-size:20px}
 .ghud .combo{margin-left:auto;font-weight:700;font-size:15px;color:var(--ink-2)}
+.ghud .gprog{font-weight:700;font-size:15px;color:var(--ink-2);white-space:nowrap}
+.gmute{border:1.5px solid var(--line);background:var(--card);border-radius:10px;width:40px;height:36px;font-size:18px;line-height:1;cursor:pointer;flex:0 0 auto}
+.gmute:focus-visible{outline:3px solid var(--sea);outline-offset:2px}
 .gq{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;min-height:140px}
 .gq .stem{padding:0;font-size:16px;line-height:1.4;margin-bottom:8px}
 .gq ol{list-style:none;padding:0;margin:0;display:grid;gap:4px}
@@ -850,6 +853,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
   </div>
   <div class="bar"><i id="progBar"></i></div>
   <div class="qbox" id="qbox"></div>
+  <p class="ghint">On a keyboard: A to E to answer, ← and → to go back or next.</p>
   <details class="sheetwrap"><summary>Answer sheet</summary><div class="sheet" id="sheet"></div></details>
 </section>
 
@@ -877,7 +881,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
   <button class="back" id="gameBack">‹ Home</button>
   <div id="gSetup">
     <div class="vhead"><h1>Cargo Dash</h1></div>
-    <p class="lead">Four containers roll toward your truck, one for each choice. Move into the lane with the right answer before they reach you. Tap <b>Lock in</b> to send them early for bonus points. Wrong answers cost a life, and you have three.</p>
+    <p class="lead">Four containers roll toward your truck, one for each choice. Move into the lane with the right answer before they reach you. Tap <b>Lock in</b> to send them early for bonus points. Wrong answers cost a life, and you have three. Get 10 in a row to win a life back. Answer every question in the part to clear it for a big bonus.</p>
     <span class="cap">Subject</span>
     <div class="opts" id="gSubj" role="radiogroup" aria-label="Subject"></div>
     <span class="cap">Questions from</span>
@@ -886,7 +890,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
     <p class="muted" style="font-size:14px">Keyboard: ← → or A–D to move, Space to lock in.</p>
   </div>
   <div id="gPlay" class="hide">
-    <div class="ghud"><span class="sc num" id="gScore">0</span><span class="lives" id="gLives" aria-label="Lives"></span><span class="combo num" id="gCombo"></span></div>
+    <div class="ghud"><span class="sc num" id="gScore">0</span><span class="lives" id="gLives" aria-label="Lives"></span><span class="combo num" id="gCombo"></span><span class="gprog num" id="gProg"></span><button class="gmute" id="gMute" type="button"></button></div>
     <div class="gq" id="gQ"></div>
     <canvas class="gcanvas" id="gCanvas" aria-label="Cargo Dash game"></canvas>
     <div class="lanes" id="gLanes"></div>
@@ -897,7 +901,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
     <div class="result">
       <div class="stamp pass" id="gStamp"></div>
       <div>
-        <h1 class="res-h">Game over</h1>
+        <h1 class="res-h" id="gOverTitle">Game over</h1>
         <p class="muted" id="gOverSub" style="margin:8px 0 0"></p>
         <div class="row" style="margin-top:14px"><button class="btn" id="gAgain">Play again</button><a class="btn ghost" href="#board">Leaderboard</a></div>
       </div>
@@ -1110,7 +1114,10 @@ $('#meChip').addEventListener('click', () => askName());
 
 /* ---------- leaderboard backend ---------- */
 const LB = {
-  entries: [], live: false, fb: null, unsub: null, listeners: [],
+  // entries: the latest new-best posts (home feed + toasts); on this-device mode, every local score.
+  // bests: one document per person per board (online only). It never grows past people x boards,
+  // so every page load stays cheap on Firebase's free daily read quota, all season long.
+  entries: [], bests: [], live: false, fb: null, unsubs: [], listeners: [], bestsReady: null,
   on(fn) { this.listeners.push(fn); },
   emit() { this.listeners.forEach(f => f(this.entries)); },
   status(live, txt) { this.live = live; $('#liveDot').classList.toggle('live', live); $('#liveTxt').textContent = txt; },
@@ -1134,37 +1141,83 @@ const LB = {
   },
   subscribe() {
     if (!this.fb) return;
-    if (this.unsub) { this.unsub(); this.unsub = null; }
-    if (!me.code) { this.status(false, 'Need group code'); this.entries = []; this.emit(); return; }
-    const { fs, db } = this.fb;
-    const q = fs.query(fs.collection(db, 'rooms', me.code, 'scores'), fs.orderBy('ts', 'desc'), fs.limit(800));
-    let first = true;
+    this.unsubs.forEach(u => u()); this.unsubs = [];
+    if (!me.code) { this.status(false, 'Need group code'); this.entries = []; this.bests = []; this.emit(); return; }
+    const { fs, db } = this.fb, code = me.code;
+    const ms = x => ({ ...x, ts: x.ts && x.ts.toMillis ? x.ts.toMillis() : Date.now() });
+    let warned = false;
+    const fail = err => {
+      console.warn(err);
+      if (warned) return; warned = true;
+      if (err.code === 'permission-denied') { this.status(false, 'Wrong code'); toast("That group code doesn't match. Tap your name to fix it.", true); }
+      else if (err.code === 'resource-exhausted') { this.status(false, 'Resting'); toast("The leaderboard hit today's free limit and is back at 4 PM. Exams, cheat sheet and game still work.", true); }
+      else this.status(false, 'Offline');
+    };
+    let gotFeed = false, gotBests = false, resolveBests;
+    this.bestsReady = new Promise(r => { resolveBests = r; });
+    const done = () => { if (gotFeed && gotBests) { this.status(true, 'Live'); this.emit(); } };
     this.status(false, 'Connecting');
-    this.unsub = fs.onSnapshot(q, snap => {
-      if (!first) {
+    const feedQ = fs.query(fs.collection(db, 'rooms', code, 'scores'), fs.orderBy('ts', 'desc'), fs.limit(12));
+    this.unsubs.push(fs.onSnapshot(feedQ, snap => {
+      if (gotFeed) {
         snap.docChanges().forEach(ch => {
           if (ch.type !== 'added' || ch.doc.metadata.hasPendingWrites) return;
           const e = ch.doc.data();
           if (e.name !== me.name) toast(e.name + ' ' + describe(e));
         });
       }
-      first = false;
-      this.entries = snap.docs.map(d => { const x = d.data({ serverTimestamps: 'estimate' }); return { ...x, ts: x.ts && x.ts.toMillis ? x.ts.toMillis() : Date.now() }; });
-      this.status(true, 'Live');
-      this.emit();
-    }, err => {
-      console.warn(err);
-      if (err.code === 'permission-denied') { this.status(false, 'Wrong code'); toast("That group code doesn't match. Tap your name to fix it.", true); }
-      else this.status(false, 'Offline');
-    });
+      gotFeed = true;
+      this.entries = snap.docs.map(d => ms(d.data({ serverTimestamps: 'estimate' })));
+      done();
+    }, fail));
+    this.unsubs.push(fs.onSnapshot(fs.collection(db, 'rooms', code, 'best'), snap => {
+      this.bests = snap.docs.map(d => ({ ...ms(d.data({ serverTimestamps: 'estimate' })), _id: d.id }));
+      if (!gotBests) { gotBests = true; resolveBests(); this.backfill(code); }
+      done();
+    }, err => { resolveBests(); fail(err); }));
+  },
+  // Scores posted before the one-best-per-person boards existed are copied over once per device.
+  async backfill(code) {
+    if (store.get('bf.' + code)) return;
+    try {
+      const { fs, db } = this.fb;
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'rooms', code, 'scores'), fs.where('ts', '<', new Date('2027-01-01T00:00:00+08:00')), fs.limit(500)));
+      const top = new Map();
+      snap.docs.forEach(d => {
+        const x = d.data(), b = BOARDS.find(bb => bb.f(x));
+        if (!b || !x.name) return;
+        const id = `${b.id}__${nameKey(x.name)}`, c = top.get(id);
+        const e = { ...x, ts: x.ts && x.ts.toMillis ? x.ts.toMillis() : 0 };
+        if (!c || better(e, c.e, b.kind)) top.set(id, { e, b });
+      });
+      for (const [id, { e, b }] of top) {
+        const cur = this.bests.find(y => y._id === id);
+        if (cur && !better(e, cur, b.kind)) continue;
+        try { await fs.setDoc(fs.doc(db, 'rooms', code, 'best', id), { name: e.name, kind: e.kind, subj: e.subj, part: e.part, score: e.score | 0, total: e.total | 0, secs: e.secs | 0, combo: e.combo | 0, ts: fs.serverTimestamp() }); }
+        catch (err) { /* someone else already copied a better one */ }
+      }
+      store.set('bf.' + code, 1);
+    } catch (err) { console.warn('backfill', err); }
   },
   async add(e) {
     const entry = { name: me.name || 'Guest', kind: e.kind, subj: e.subj, part: e.part, score: e.score | 0, total: e.total | 0, secs: e.secs | 0, combo: e.combo | 0 };
     if (this.fb) {
       if (!me.code) { toast('Add the group code to post scores. Tap your name.', true); return false; }
-      const { fs, db } = this.fb;
-      try { await fs.addDoc(fs.collection(db, 'rooms', me.code, 'scores'), { ...entry, ts: fs.serverTimestamp() }); return true; }
-      catch (err) { console.warn(err); toast("Your score wasn't posted. Check the group code (tap your name).", true); return false; }
+      const board = BOARDS.find(b => b.f(entry));
+      if (!board) return false;
+      await Promise.race([this.bestsReady, new Promise(r => setTimeout(r, 6000))]);
+      const id = `${board.id}__${nameKey(entry.name)}`;
+      const cur = this.bests.find(x => x._id === id);
+      // Only a new personal best is saved. The board only ever shows each person's best anyway.
+      if (cur && !better({ ...entry, ts: Date.now() }, cur, board.kind)) return 'kept';
+      const { fs, db } = this.fb, code = me.code;
+      try {
+        const batch = fs.writeBatch(db);
+        batch.set(fs.doc(db, 'rooms', code, 'best', id), { ...entry, ts: fs.serverTimestamp() });
+        batch.set(fs.doc(fs.collection(db, 'rooms', code, 'scores')), { ...entry, ts: fs.serverTimestamp() });
+        await batch.commit();
+        return true;
+      } catch (err) { console.warn(err); toast("Your score wasn't posted. Check your internet or the group code (tap your name).", true); return false; }
     }
     const list = store.get('local', []);
     list.unshift({ ...entry, ts: Date.now() });
@@ -1191,7 +1244,7 @@ function better(a, b, kind) {
 }
 function ranking(board) {
   const by = new Map();
-  for (const e of LB.entries.filter(board.f)) {
+  for (const e of (LB.fb ? LB.bests : LB.entries).filter(board.f)) {
     const k = String(e.name).toLowerCase();
     const cur = by.get(k);
     if (!cur || better(e, cur, board.kind)) by.set(k, e);
@@ -1361,7 +1414,8 @@ async function finishExam() {
   go('results');
   if (s.mode === 'exam') {
     const ok = await LB.add({ kind: 'exam', subj: s.subj, part: s.part, score, total: s.ids.length, secs: s.elapsed });
-    if (ok) toast('Score posted to the leaderboard.');
+    if (ok === 'kept') toast('Not better than your best on this part, so the board keeps your best.');
+    else if (ok) toast('New best! Posted to the leaderboard.');
     renderResults();
   }
 }
@@ -1408,21 +1462,60 @@ const cv = $('#gCanvas'), ctx = cv.getContext('2d');
 function sizeCanvas() { const r = cv.getBoundingClientRect(), d = Math.min(window.devicePixelRatio || 1, 2); cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); ctx.setTransform(d, 0, 0, d, 0, 0); G.W = r.width; G.H = r.height; }
 window.addEventListener('resize', () => { if (G.running) sizeCanvas(); });
 function gShow(which) { ['gSetup', 'gPlay', 'gOver'].forEach(id => $('#' + id).classList.toggle('hide', id !== which)); }
+/* ---------- sound (synthesized with Web Audio, no files to load) ---------- */
+const SND = {
+  ctx: null,
+  get on() { return store.get('snd', true); },
+  unlock() {
+    try {
+      if (!this.ctx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return; this.ctx = new AC(); }
+      if (this.ctx.state === 'suspended') this.ctx.resume();
+    } catch (e) { /* no audio on this device */ }
+  },
+  tone(f, at, dur, type, vol, f2) {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain(), t = c.currentTime + at;
+    o.type = type || 'triangle'; o.frequency.setValueAtTime(f, t);
+    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol || 0.12, t + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + dur + 0.02);
+  },
+  play(name) {
+    if (!this.on || !this.ctx || this.ctx.state !== 'running') return;
+    try {
+      const T = (f, at, d, ty, v, f2) => this.tone(f, at, d, ty, v, f2);
+      if (name === 'move') T(520, 0, 0.05, 'square', 0.025);
+      else if (name === 'lock') T(220, 0, 0.22, 'sawtooth', 0.05, 880);
+      else if (name === 'ok') { T(660, 0, 0.1, 'triangle', 0.14); T(990, 0.08, 0.16, 'triangle', 0.14); }
+      else if (name === 'bad') { T(196, 0, 0.32, 'square', 0.07, 98); T(147, 0.05, 0.3, 'sawtooth', 0.04, 80); }
+      else if (name === 'combo') [523, 659, 784, 1047].forEach((f, i) => T(f, i * 0.07, 0.14, 'triangle', 0.11));
+      else if (name === 'life') { T(784, 0, 0.12, 'sine', 0.14); T(1175, 0.1, 0.22, 'sine', 0.14); }
+      else if (name === 'over') [392, 330, 262, 196].forEach((f, i) => T(f, i * 0.16, 0.26, 'triangle', 0.12));
+      else if (name === 'win') { [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => T(f, i * 0.11, 0.2, 'triangle', 0.13)); T(1568, 0.8, 0.6, 'sine', 0.1); }
+    } catch (e) { /* ignore */ }
+  }
+};
+function gMuteBtn() { const b = $('#gMute'); if (!b) return; const on = SND.on; b.textContent = on ? '🔊' : '🔇'; b.setAttribute('aria-label', on ? 'Sound on. Tap to mute.' : 'Sound off. Tap to turn on.'); b.setAttribute('aria-pressed', String(!on)); }
+$('#gMute').addEventListener('click', () => { store.set('snd', !SND.on); SND.unlock(); gMuteBtn(); if (SND.on) SND.play('ok'); });
+gMuteBtn();
+// Clearing a part: every question once, without running out of lives.
+const CLEAR_BONUS = 1000, LIFE_BONUS = 500, LIFE_EVERY = 10;
 function gStart() {
+  SND.unlock();
   const items = G.pool === 'all' ? SUBJ[G.subj].items.slice() : partItems(G.subj, +G.pool);
-  Object.assign(G, { items, deck: shuffle(items.slice()), score: 0, lives: 3, combo: 0, best: 0, correct: 0, level: 0, missed: [], parts: [], floats: [], shake: 0, road: 0, playTime: 0, lane: 1, px: null, paused: false });
+  Object.assign(G, { items, deck: shuffle(items.slice()), score: 0, lives: 3, combo: 0, best: 0, correct: 0, level: 0, missed: [], parts: [], floats: [], shake: 0, road: 0, playTime: 0, lane: 1, px: null, paused: false, done: 0, cleared: false, bonus: 0 });
   gShow('gPlay'); window.scrollTo(0, 0); sizeCanvas(); G.running = true; gNext();
   cancelAnimationFrame(G.raf); G.lastT = performance.now(); G.raf = requestAnimationFrame(gLoop);
 }
 $('#gStart').addEventListener('click', () => { if (needsLogin()) askName(gStart); else gStart(); });
 $('#gAgain').addEventListener('click', gStart);
 function gNext() {
-  if (!G.deck.length) G.deck = shuffle(G.items.slice());
   const q = G.deck.pop();
   G.q = q; G.perm = permFor(q); G.lanes = G.perm.length; G.correctLane = G.perm.indexOf(q.a);
   G.lane = Math.min(G.lane, G.lanes - 1);
   const len = q.q.length + q.c.join('').length;
-  G.T = Math.max(7, Math.min(20, 9 + len / 40) - G.level * 0.35);
+  // Reading time grows with the question's length. Each correct answer trims a little, capped at 3 s,
+  // so long parts stay finishable.
+  G.T = Math.max(10, Math.min(26, 10 + len / 35)) - Math.min(G.level * 0.06, 3);
   G.t = 0; G.fast = false; G.lockP = null; G.phase = 'run'; G.result = null;
   $('#gQ').innerHTML = `<div class="stem">${esc(q.q)}</div><ol>${G.perm.map((oi, pos) => `<li data-pos="${pos}"><i style="background:${COLORS[pos]}">${LETTERS[pos]}</i><span>${esc(q.c[oi])}</span></li>`).join('')}</ol>`;
   $('#gLanes').style.gridTemplateColumns = `repeat(${G.lanes},1fr)`;
@@ -1444,25 +1537,45 @@ function gHud() {
   $('#gScore').textContent = G.score.toLocaleString();
   $('#gLives').textContent = '♥'.repeat(Math.max(0, G.lives)) + '♡'.repeat(Math.max(0, 3 - G.lives));
   $('#gCombo').textContent = G.combo > 1 ? `Combo x${G.combo}` : `${G.correct} correct`;
+  $('#gProg').textContent = `${Math.min(G.done + (G.phase === 'run' ? 1 : 0), G.items.length)} of ${G.items.length}`;
 }
 function gLaneBtns() { $$('#gLanes button').forEach(b => b.classList.toggle('on', +b.dataset.lane === G.lane)); }
-function gMove(l) { if (!G.running || G.phase !== 'run') return; G.lane = Math.max(0, Math.min(G.lanes - 1, l)); gLaneBtns(); }
-function gLock() { if (!G.running || G.phase !== 'run' || G.fast) return; G.fast = true; G.lockP = G.t / G.T; G.fastMul = Math.max(4, (G.T - G.t) / 0.55); $('#gLock').disabled = true; }
+function gMove(l) { if (!G.running || G.phase !== 'run') return; const n = Math.max(0, Math.min(G.lanes - 1, l)); if (n !== G.lane) SND.play('move'); G.lane = n; gLaneBtns(); }
+function gLock() { if (!G.running || G.phase !== 'run' || G.fast) return; G.fast = true; G.lockP = G.t / G.T; G.fastMul = Math.max(4, (G.T - G.t) / 0.55); $('#gLock').disabled = true; SND.play('lock'); }
 $('#gLanes').addEventListener('click', e => { const b = e.target.closest('[data-lane]'); if (b) gMove(+b.dataset.lane); });
 $('#gLock').addEventListener('click', gLock);
 cv.addEventListener('pointerdown', e => { const r = cv.getBoundingClientRect(); gMove(Math.floor((e.clientX - r.left) / (r.width / G.lanes))); });
-document.addEventListener('keydown', e => {
-  if (currentView !== 'game' || !G.running) return;
-  const k = e.key.toLowerCase();
-  if (k === 'arrowleft') { gMove(G.lane - 1); e.preventDefault(); }
-  else if (k === 'arrowright') { gMove(G.lane + 1); e.preventDefault(); }
-  else if (k === ' ' || k === 'enter') { gLock(); e.preventDefault(); }
-  else { const i = 'abcde'.indexOf(k) >= 0 ? 'abcde'.indexOf(k) : '12345'.indexOf(k); if (i >= 0 && i < G.lanes) gMove(i); }
-});
+// Keyboard (PC/laptop). Listens on window in the capture phase so a focused button or other element
+// can't swallow the keys. Uses e.code as a fallback for keyboards/browsers that report e.key oddly.
+window.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target, tag = t && t.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+  if (!$('#nameDlg').classList.contains('hide')) return;
+  const key = String(e.key || '').toLowerCase(), code = String(e.code || '');
+  const left = key === 'arrowleft' || code === 'ArrowLeft', right = key === 'arrowright' || code === 'ArrowRight';
+  let idx = 'abcde'.indexOf(key.length === 1 ? key : '#');
+  if (idx < 0) idx = '12345'.indexOf(key.length === 1 ? key : '#');
+  if (idx < 0) { const m = /^(?:Key([A-E])|Digit([1-5])|Numpad([1-5]))$/.exec(code); if (m) idx = m[1] ? 'ABCDE'.indexOf(m[1]) : +(m[2] || m[3]) - 1; }
+  if (currentView === 'game' && G.running) {
+    if (left) { gMove(G.lane - 1); e.preventDefault(); }
+    else if (right) { gMove(G.lane + 1); e.preventDefault(); }
+    else if (key === ' ' || key === 'enter' || code === 'Space' || code === 'Enter' || code === 'NumpadEnter') { gLock(); e.preventDefault(); }
+    else if (idx >= 0 && idx < G.lanes) { gMove(idx); e.preventDefault(); }
+    return;
+  }
+  if (currentView === 'run' && EX.s) {
+    let b = null;
+    if (left) b = $('#prevQ');
+    else if (right) b = $('#nextQ');
+    else if (idx >= 0) b = $$('#choices .choice')[idx];
+    if (b && !b.disabled) { b.click(); e.preventDefault(); }
+  }
+}, true);
 document.addEventListener('visibilitychange', () => { G.paused = document.hidden; G.lastT = performance.now(); });
 function gResolve() {
   const ok = G.lane === G.correctLane;
-  G.phase = 'result'; G.result = ok;
+  G.phase = 'result'; G.result = ok; G.done++;
   const bonus = G.lockP != null ? Math.round((1 - G.lockP) * 100) : 0;
   const laneW = G.W / G.lanes, x = (G.lane + .5) * laneW, y = G.H - 70;
   if (ok) {
@@ -1471,25 +1584,37 @@ function gResolve() {
     const pts = Math.round((100 + bonus) * mult);
     G.score += pts; G.rt = 0.9;
     G.floats.push({ x, y: y - 40, t: 1.1, txt: '+' + pts });
+    if (G.combo % LIFE_EVERY === 0 && G.lives < 3) { G.lives++; G.floats.push({ x, y: y - 80, t: 1.4, txt: '+1 life' }); SND.play('life'); }
+    else if (G.combo % 5 === 0) SND.play('combo');
+    else SND.play('ok');
     if (!reduceMotion) for (let i = 0; i < 26; i++) G.parts.push({ x, y: y - 30, vx: (Math.random() - .5) * 320, vy: -Math.random() * 360 - 80, t: 1, c: COLORS[i % G.lanes] });
   } else {
     G.lives--; G.combo = 0; G.rt = 2.1; G.shake = reduceMotion ? 0 : 12;
     G.missed.push({ q: G.q, chose: G.perm[G.lane] });
     G.floats.push({ x, y: y - 40, t: 1.4, txt: '−1 life' });
+    SND.play('bad');
   }
   $$('#gQ li').forEach(li => li.classList.toggle('good', +li.dataset.pos === G.correctLane));
   $('#gLock').disabled = true;
   gHud();
 }
-function gOver() {
+function gOver(win) {
   G.running = false; cancelAnimationFrame(G.raf);
+  G.cleared = !!win;
+  if (win) { G.bonus = CLEAR_BONUS + LIFE_BONUS * G.lives; G.score += G.bonus; }
+  SND.play(win ? 'win' : 'over');
   gShow('gOver');
+  const n = G.items.length, where = G.pool === 'all' ? `all of ${G.subj}` : `${G.subj} Part ${G.pool}`;
+  $('#gOverTitle').textContent = win ? 'Part cleared!' : 'Game over';
+  if (win && G.pool === 'all') $('#gOverTitle').textContent = `${G.subj} cleared!`;
   const st = $('#gStamp');
-  st.innerHTML = `<div><b>SCORE</b><span class="num" style="font-size:${G.score > 9999 ? 32 : 40}px">${G.score.toLocaleString()}</span><small>BEST COMBO X${G.best}</small></div>`;
+  st.innerHTML = `<div><b>${win ? 'CLEARED' : 'SCORE'}</b><span class="num" style="font-size:${G.score > 9999 ? 32 : 40}px">${G.score.toLocaleString()}</span><small>BEST COMBO X${G.best}</small></div>`;
   st.className = 'stamp pass'; if (!reduceMotion) { void st.offsetWidth; st.classList.add('anim'); }
-  $('#gOverSub').textContent = `${G.correct} correct answer${G.correct === 1 ? '' : 's'} before running out of lives.`;
-  $('#gMissed').innerHTML = G.missed.length ? '<div class="vhead"><h1 style="font-size:22px">Review what you missed</h1></div>' + G.missed.map(m => `<div class="rev"><div class="qhead"><span>No. ${m.q.n}</span></div><div class="stem">${esc(m.q.q)}</div><div class="ans"><div>You picked: <s>${esc(m.q.c[m.chose])}</s></div><div style="color:var(--ok);font-weight:700">Answer key: ${esc(m.q.c[m.q.a])}</div></div>${m.q.f ? `<div class="note"><b>Double-check this one:</b> ${esc(m.q.f)}</div>` : ''}</div>`).join('') : '';
-  LB.add({ kind: 'game', subj: G.subj, part: G.pool === 'all' ? 0 : +G.pool, score: G.score, total: G.correct, secs: Math.round(G.playTime), combo: G.best }).then(ok => { if (ok) toast('Score posted to the leaderboard.'); });
+  $('#gOverSub').textContent = win
+    ? `You answered all ${n} questions of ${where}, ${G.correct} of them right. Clear bonus: +${G.bonus.toLocaleString()} (${CLEAR_BONUS.toLocaleString()} + ${LIFE_BONUS} for each heart left).`
+    : `${G.correct} correct out of ${G.done} of ${n} questions before running out of lives.`;
+  $('#gMissed').innerHTML = G.missed.length ? '<div class="vhead"><h1 style="font-size:22px">Review what you missed</h1></div>' + G.missed.map(m => `<div class="rev"><div class="qhead"><span>No. ${m.q.n}</span></div><div class="stem">${esc(m.q.q)}</div><div class="ans"><div>You picked: <s>${esc(m.q.c[m.chose])}</s></div><div style="color:var(--ok);font-weight:700">Answer key: ${esc(m.q.c[m.q.a])}</div></div>${m.q.f ? `<div class="note"><b>Double-check this one:</b> ${esc(m.q.f)}</div>` : ''}</div>`).join('') : (win ? '<p class="muted" style="margin-top:18px">No mistakes. Perfect run.</p>' : '');
+  LB.add({ kind: 'game', subj: G.subj, part: G.pool === 'all' ? 0 : +G.pool, score: G.score, total: G.correct, secs: Math.round(G.playTime), combo: G.best }).then(ok => { if (ok === 'kept') toast('Not a new personal best, so your board score stays.'); else if (ok) toast('New best! Posted to the leaderboard.'); });
 }
 function gStop() { if (G.running) { G.running = false; cancelAnimationFrame(G.raf); } }
 $('#gameBack').addEventListener('click', () => { gStop(); gShow('gSetup'); go('home'); });
@@ -1504,7 +1629,11 @@ function gLoop(now) {
     if (G.t >= G.T) { G.t = G.T; gResolve(); }
   } else if (G.phase === 'result') {
     G.rt -= dt;
-    if (G.rt <= 0) { if (G.lives <= 0) { gDraw(dt); gOver(); return; } gNext(); }
+    if (G.rt <= 0) {
+      if (G.lives <= 0) { gDraw(dt); gOver(false); return; }
+      if (!G.deck.length) { gDraw(dt); gOver(true); return; }
+      gNext();
+    }
   }
   gDraw(dt);
   G.raf = requestAnimationFrame(gLoop);
@@ -1512,7 +1641,7 @@ function gLoop(now) {
 function rr(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
 function gDraw(dt) {
   const W = G.W, H = G.H, n = G.lanes, lw = W / n;
-  const speed = G.phase === 'run' ? (G.fast ? 900 : 120 + G.level * 6) : 40;
+  const speed = G.phase === 'run' ? (G.fast ? 900 : 120 + Math.min(G.level, 30) * 3) : 40;
   G.road = (G.road + speed * dt) % 48;
   ctx.save();
   if (G.shake > 0) { ctx.translate((Math.random() - .5) * G.shake, (Math.random() - .5) * G.shake); G.shake = Math.max(0, G.shake - 40 * dt); }
