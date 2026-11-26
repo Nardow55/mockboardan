@@ -266,6 +266,8 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
 .lanes button.on{outline:3px solid var(--ink);outline-offset:3px}
 .lanes button[data-lane="2"],.gq li:nth-child(3) i{color:#2A1E00}
 .lock{width:100%;margin-top:10px}
+.ghint{display:none;margin:8px 0 0;text-align:center;font-size:13px;color:var(--ink-2)}
+@media (hover:hover) and (pointer:fine){.ghint{display:block}}
 
 /* dialogs, toasts */
 .overlay{position:fixed;inset:0;background:rgba(8,18,60,.55);backdrop-filter:blur(4px);display:grid;place-items:center;z-index:50;padding:16px}
@@ -888,6 +890,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
     <canvas class="gcanvas" id="gCanvas" aria-label="Cargo Dash game"></canvas>
     <div class="lanes" id="gLanes"></div>
     <button class="btn lock" id="gLock">Lock in</button>
+    <p class="ghint">On a keyboard: ← and → (or A to E) to switch lanes, Enter to lock in.</p>
   </div>
   <div id="gOver" class="hide">
     <div class="result">
@@ -1407,7 +1410,7 @@ function gShow(which) { ['gSetup', 'gPlay', 'gOver'].forEach(id => $('#' + id).c
 function gStart() {
   const items = G.pool === 'all' ? SUBJ[G.subj].items.slice() : partItems(G.subj, +G.pool);
   Object.assign(G, { items, deck: shuffle(items.slice()), score: 0, lives: 3, combo: 0, best: 0, correct: 0, level: 0, missed: [], parts: [], floats: [], shake: 0, road: 0, playTime: 0, lane: 1, px: null, paused: false });
-  gShow('gPlay'); sizeCanvas(); G.running = true; gNext();
+  gShow('gPlay'); window.scrollTo(0, 0); sizeCanvas(); G.running = true; gNext();
   cancelAnimationFrame(G.raf); G.lastT = performance.now(); G.raf = requestAnimationFrame(gLoop);
 }
 $('#gStart').addEventListener('click', () => { if (needsLogin()) askName(gStart); else gStart(); });
@@ -1425,6 +1428,16 @@ function gNext() {
   $('#gLanes').innerHTML = G.perm.map((_, pos) => `<button data-lane="${pos}" style="background:${COLORS[pos]}" aria-label="Lane ${LETTERS[pos]}">${LETTERS[pos]}</button>`).join('');
   gHud(); gLaneBtns();
   $('#gLock').disabled = false;
+  requestAnimationFrame(gFit);
+}
+// On short laptop screens the Lock in button can sit just below the fold. Scroll just enough to show it,
+// without pushing the question under the sticky header.
+function gFit() {
+  if (currentView !== 'game' || !G.running) return;
+  const lock = $('#gLock').getBoundingClientRect(), q = $('#gQ').getBoundingClientRect();
+  const head = $('.top').getBoundingClientRect().height + 8;
+  const need = lock.bottom + 12 - innerHeight, room = q.top - head;
+  if (need > 0 && room > 0) window.scrollBy(0, Math.min(need, room));
 }
 function gHud() {
   $('#gScore').textContent = G.score.toLocaleString();
