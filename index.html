@@ -278,7 +278,8 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
 .field input{width:100%;border:1.5px solid var(--line);border-radius:12px;padding:11px 13px;background:var(--bg);font-size:17px}
 .err{color:var(--bad);font-weight:600;font-size:15px;margin:4px 0 12px;min-height:0}
 .err:empty{display:none}
-#pinIn{letter-spacing:.5em;font-weight:700}
+#pinIn{-webkit-text-security:disc;letter-spacing:.3em;font-weight:700}
+#pinIn::placeholder{letter-spacing:.3em}
 .field input:focus{border-color:var(--sea);outline:none;box-shadow:0 0 0 4px var(--sea-tint)}
 .toasts{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom));transform:translateX(-50%);display:grid;gap:8px;z-index:60;width:min(92vw,420px)}
 .toast{background:#10141E;color:#fff;padding:11px 15px;border-radius:12px;font-size:15px;box-shadow:0 10px 30px rgba(0,0,0,.3);border-left:5px solid var(--cE)}
@@ -923,7 +924,7 @@ details.sheetwrap summary{cursor:pointer;font-weight:700}
     <h2 id="nameTitle">Join the board</h2>
     <p class="muted" style="margin:0" id="nameHelp">Your name shows next to your scores.</p>
     <label class="field"><span class="cap">Name</span><input id="nameIn" maxlength="20" autocomplete="nickname" required></label>
-    <label class="field" id="pinField"><span class="cap">4-digit PIN (don't use your bank PIN)</span><input id="pinIn" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="4 numbers"></label>
+    <label class="field" id="pinField"><span class="cap">4-digit PIN (pick any 4 numbers you'll remember)</span><input id="pinIn" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="••••"></label>
     <label class="field" id="codeField"><span class="cap">Group code (ask Nard)</span><input id="codeIn" maxlength="24" autocomplete="off" autocapitalize="none"></label>
     <p class="err" id="nameErr" role="alert"></p>
     <div class="row"><button class="btn" type="submit" id="nameSave">Save</button><button class="btn ghost" type="button" id="nameSkip">Not now</button></div>
